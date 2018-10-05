@@ -1,0 +1,342 @@
+{% set p_bulk_indexing_clients = (bulk_indexing_clients | default(25)) %}
+{% set p_client_count = (10 + p_bulk_indexing_clients) %}
+{% set p_iterations = 200000 %}
+{% set p_iterations_per_client = (p_iterations / p_bulk_indexing_clients) | int %}
+{% set p_description = description | default('Unknown') %}
+{% set p_duration_secs = 1800 %}
+
+{
+  "name": "evaluation_64gb",
+  "description": "Standard logging challenge which runs a set of scenarios against a single 64GB node to evaluate and compare hardware performence.",
+  "meta": {
+    "client_count": {{ p_bulk_indexing_clients }},
+    "description": "{{ p_description }}"
+  },
+  "schedule": [
+    {
+      "name": "deleteindex_elasticlogs_q-1",
+      "operation": {
+        "operation-type": "delete-index",
+        "index": "elasticlogs_q-1"
+      },
+      "clients": 1,
+      "iterations": 1,
+      "include-in-reporting": false
+    },
+    {
+      "name": "create_elasticlogs_q-1",
+      "operation": {
+        "operation-type": "createindex",
+        "index_name": "elasticlogs_q-1",
+        "index_template_body": {
+          "template": "elasticlogs_q-1",
+          "settings": {
+            "index.refresh_interval": "5s",
+            "index.codec": "best_compression",
+            "index.number_of_replicas": 0,
+            "index.number_of_shards": 4
+          },
+          "mappings": "mappings.json",
+          "aliases": {}
+        },
+        "index_template_name": "elasticlogs_q-1"
+      },
+      "clients": 1,
+      "iterations": 1,
+      "include-in-reporting": false
+    },
+    {
+      "name": "index-append-1000-elasticlogs_q-1",
+      "operation": {
+        "operation-type": "bulk",
+        "param-source": "elasticlogs_bulk",
+        "index": "elasticlogs_q-1",
+        "bulk-size": 1000
+      },
+      "iterations": {{ p_iterations_per_client }},
+      "clients": {{ p_bulk_indexing_clients }}
+    },
+    {
+      "name": "refresh_q-1",
+      "operation": "refresh",
+      "iterations": 1,
+      "clients": 1,
+      "include-in-reporting": false
+    },
+    {% for idx in range(1, 6) %}
+    {
+      "name": "shrink-index-{{ idx }}",
+      "operation": {
+        "operation-type": "shrink-index",
+        "source-index": "elasticlogs_q-1",
+        "target-index": "elasticlogs_q-{{ idx }}",
+        "target-body": {
+          "settings": {
+            "index.number_of_replicas": 0,
+            "index.number_of_shards": 2,
+            "index.codec": "best_compression"
+          }
+        }
+      },
+      "iterations": 1,
+      "clients": 1,
+      "include-in-reporting": false
+    },
+    {% endfor %}
+    {
+      "name": "force-merge",
+      "operation": {
+        "operation-type": "force-merge",
+        "max-num-segments": 5
+      },
+      "clients": 1,
+      "iterations": 1,
+      "include-in-reporting": false
+    },
+    {
+      "operation": "deleteindex_elasticlogs_i-*",
+      "clients": 1,
+      "iterations": 1,
+      "include-in-reporting": false
+    },
+    {
+      "name": "create_elasticlogs_i_write",
+      "operation": {
+        "operation-type": "createindex",
+        "index_name": "elasticlogs_i-000001",
+        "alias": "elasticlogs_i_write",
+        "index_template_body": {
+          "template": "elasticlogs_i-*",
+          "settings": {
+            "index.refresh_interval": "5s",
+            "index.codec": "best_compression",
+            "index.number_of_replicas": 0,
+            "index.number_of_shards": 4
+          },
+          "mappings": "mappings.json",
+          "aliases": {}
+        },
+        "index_template_name": "elasticlogs_i_write"
+      },
+      "clients": 1,
+      "iterations": 1,
+      "include-in-reporting": false
+    },
+    {
+      "operation": "fieldstats_elasticlogs_q-*",
+      "iterations": 1,
+      "clients": {{ p_client_count }},
+      "include-in-reporting": false
+    },
+    {
+      "parallel": {
+        "warmup-time-period": 0,
+        "time-period": {{ p_duration_secs }},
+        "clients": 3,
+        "tasks": [
+          {
+            "name": "historic-content_issues-0k-50%",
+            "operation": "relative-kibana-content_issues-dashboard_50%",
+            "target-interval": 60,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-traffic-0k-50%",
+            "operation": "relative-kibana-traffic-dashboard_50%",
+            "target-interval": 60,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-discover-0k-50%",
+            "operation": "relative-kibana-discover_50%",
+            "target-interval": 60,
+            "schedule": "poisson"
+          }
+        ]
+      }
+    },
+    {
+      "parallel": {
+        "warmup-time-period": 0,
+        "time-period": {{ p_duration_secs }},
+        "tasks": [
+          {
+            "name": "index-elasticlogs_i_write-pre8k",
+            "operation": "index-append-1000-elasticlogs_i_write",
+            "target-throughput": 8,
+            "clients": {{ p_bulk_indexing_clients }},
+            "include-in-reporting": false   
+          },
+          {
+            "name": "rollover_elasticlogs_i_write_100M-pre8k",
+            "operation": "rollover_elasticlogs_i_write_100M",
+            "target-interval": 30,
+            "clients": 1,
+            "include-in-reporting": false 
+          }
+        ]
+      }
+    },
+    {
+      "parallel": {
+        "warmup-time-period": 0,
+        "time-period": {{ p_duration_secs }},
+        "tasks": [
+          {
+            "name": "index-elasticlogs_i_write-8k",
+            "operation": "index-append-1000-elasticlogs_i_write",
+            "target-throughput": 8,
+            "clients": {{ p_bulk_indexing_clients }}
+          },
+          {
+            "name": "rollover_elasticlogs_i_write_100M-8k",
+            "operation": "rollover_elasticlogs_i_write_100M",
+            "target-interval": 20,
+            "clients": 1,
+            "include-in-reporting": false 
+          },
+          {
+            "name": "current-traffic-30m-8k",
+            "operation": "current-kibana-traffic-dashboard_30m",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "current-content_issues-30m-8k",
+            "operation": "current-kibana-content_issues-dashboard_30m",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "current-traffic-15m-8k",
+            "operation": "current-kibana-traffic-dashboard_15m",
+            "target-interval": 30,
+            "clients": 2,
+            "schedule": "poisson"
+          },
+          {
+            "name": "current-content_issues-15m-8k",
+            "operation": "current-kibana-content_issues-dashboard_15m",
+            "target-interval": 30,
+            "clients": 2,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-content_issues-8k-50%",
+            "operation": "relative-kibana-content_issues-dashboard_50%",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-traffic-8k-50%",
+            "operation": "relative-kibana-traffic-dashboard_50%",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-discover-8k-50%",
+            "operation": "relative-kibana-discover_50%",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          }
+        ]
+      }
+    },
+    {
+      "parallel": {
+        "time-period": {{ p_duration_secs }},
+        "tasks": [
+          {
+            "name": "index-elasticlogs_i_write-pre16k",
+            "operation": "index-append-1000-elasticlogs_i_write",
+            "target-throughput": 60,
+            "clients": {{ p_bulk_indexing_clients }},
+            "include-in-reporting": false   
+          },
+          {
+            "name": "rollover_elasticlogs_i_write_100M-pre16k",
+            "operation": "rollover_elasticlogs_i_write_100M",
+            "target-interval": 30,
+            "clients": 1,
+            "include-in-reporting": false 
+          }
+        ]
+      }
+    },
+    {
+      "parallel": {
+        "time-period": {{ p_duration_secs }},
+        "tasks": [
+          {
+            "name": "index-elasticlogs_i_write-16k",
+            "operation": "index-append-1000-elasticlogs_i_write",
+            "target-throughput": 16,
+            "clients": {{ p_bulk_indexing_clients }}
+          },
+          {
+            "name": "rollover_elasticlogs_i_write_100M-16k",
+            "operation": "rollover_elasticlogs_i_write_100M",
+            "target-interval": 30,
+            "clients": 1,
+            "include-in-reporting": false 
+          },
+          {
+            "name": "current-traffic-30m-16k",
+            "operation": "current-kibana-traffic-dashboard_30m",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "current-content_issues-30m-16k",
+            "operation": "current-kibana-content_issues-dashboard_30m",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "current-traffic-15m-16k",
+            "operation": "current-kibana-traffic-dashboard_15m",
+            "target-interval": 30,
+            "clients": 2,
+            "schedule": "poisson"
+          },
+          {
+            "name": "current-content_issues-15m-16k",
+            "operation": "current-kibana-content_issues-dashboard_15m",
+            "target-interval": 30,
+            "clients": 2,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-content_issues-16k-50%",
+            "operation": "relative-kibana-content_issues-dashboard_50%",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-traffic-16k-50%",
+            "operation": "relative-kibana-traffic-dashboard_50%",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          },
+          {
+            "name": "historic-discover-16k-50%",
+            "operation": "relative-kibana-discover_50%",
+            "target-interval": 60,
+            "clients": 1,
+            "schedule": "poisson"
+          }
+        ]
+      }
+    }
+  ]
+}
+
